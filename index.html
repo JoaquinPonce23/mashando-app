@@ -1948,7 +1948,7 @@ async function descargarPDF(){
     const rec=recetas.filter(r=>String(r.producto_id)===String(p.id));
     let costoUnit=rec.reduce((s,r)=>{
       const ing=ingredientes.find(x=>String(x.id)===String(r.ingrediente_id));
-      return s+(ing?parseFloat(r.cantidad)*parseFloat(ing.costo_unitario||0):0);
+      return s+(ing?parseFloat(r.cantidad)*parseFloat(ing.costo_unit||0):0);
     },0);
     const ventaUnit=p.qty>0?p.total/p.qty:0;
     const margenUnit=ventaUnit-costoUnit;
@@ -2318,8 +2318,14 @@ async function loadIngredientes(){
   if(!error) ingredientes=data||[];
 }
 async function loadRecetas(){
-  const{data,error}=await db.from('recetas').select('*, ingredientes(nombre,unidad,costo_unitario)').order('producto_id');
+  const{data,error}=await db.from('recetas').select('*, ingredientes(nombre,unidad,costo_unit)').order('producto_id');
   if(!error) recetas=data||[];
+}
+async function loadRecetasGrouped(){
+  const{data}=await db.from('recetas')
+    .select('id, cantidad, ingredientes(id, nombre, unidad, costo_unit), productos(id, nombre)')
+    .order('cantidad',{ascending:false});
+  return data||[];
 }
 async function renderIngredientes(){
   await Promise.all([loadIngredientes(),loadRecetas(),loadProducts()]);
@@ -2354,7 +2360,7 @@ function renderIngStock(){
         <td style="font-family:var(--mono);color:var(--text2)">${ing.unidad||'—'}</td>
         <td style="font-family:var(--mono);${bajo?'color:var(--danger);font-weight:700':''}">${ing.stock_actual??'—'}</td>
         <td style="font-family:var(--mono);color:var(--text3)">${ing.stock_minimo??'—'}</td>
-        <td style="font-family:var(--mono);color:var(--accent)">$${parseFloat(ing.costo_unitario||0).toLocaleString('es')}</td>
+        <td style="font-family:var(--mono);color:var(--accent)">$${parseFloat(ing.costo_unit||0).toLocaleString('es')}</td>
         <td style="text-align:right;white-space:nowrap">
           <button class="action-btn" onclick="editIngrediente(${ing.id})" title="Editar"><svg viewBox="0 0 15 15" fill="none"><path d="M11 2l2 2-8 8H3v-2l8-8z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         </td>
@@ -2367,19 +2373,29 @@ function renderIngStock(){
 async function renderIngRecetas(){
   if(!products.length) await loadProducts();
   if(!ingredientes.length) await loadIngredientes();
-  await loadRecetas();
   const cont=document.getElementById('ing-recetas-container');
+  cont.innerHTML='<div class="loading"><div class="spin"></div>Cargando...</div>';
+  const rows=await loadRecetasGrouped();
   if(!products.length){cont.innerHTML='<div class="empty">Sin productos en el menú</div>';return;}
+  // Group recipe rows by product id
+  const byProd={};
+  rows.forEach(r=>{
+    const pid=r.productos?.id;
+    if(!pid) return;
+    if(!byProd[pid]) byProd[pid]={nombre:r.productos.nombre,items:[]};
+    byProd[pid].items.push(r);
+  });
   cont.innerHTML=products.map(prod=>{
-    const rec=recetas.filter(r=>r.producto_id===prod.id);
+    const grupo=byProd[prod.id];
+    const itemsHtml=grupo&&grupo.items.length
+      ?grupo.items.map(r=>`<div class="recipe-row"><span class="recipe-row-name">• ${r.ingredientes?.nombre||'—'}</span><span class="recipe-row-qty">${r.cantidad} ${r.ingredientes?.unidad||''}</span></div>`).join('')
+      :'<div style="font-size:12px;color:var(--text3);padding:2px 0">Sin receta configurada</div>';
     return`<div class="recipe-section">
       <div class="recipe-prod-name">
-        <span>${prod.nombre}</span>
+        <span style="font-weight:800">${prod.nombre}</span>
         <button class="btn btn-ghost btn-xs" onclick="editReceta(${prod.id})">Editar receta</button>
       </div>
-      <div class="recipe-items">
-        ${rec.length?rec.map(r=>`<div class="recipe-row"><span class="recipe-row-name">${r.ingredientes?.nombre||'—'}</span><span class="recipe-row-qty">${r.cantidad} ${r.ingredientes?.unidad||''}</span></div>`).join(''):'<div style="font-size:12px;color:var(--text3);padding:2px 0">Sin receta configurada</div>'}
-      </div>
+      <div class="recipe-items">${itemsHtml}</div>
     </div>`;
   }).join('');
 }
@@ -2421,7 +2437,7 @@ async function calcular(){
   const rows=entries.map(e=>{
     const ing=ingredientes.find(i=>i.id===e.id);
     if(!ing) return'';
-    const costo=e.total*parseFloat(ing.costo_unitario||0);
+    const costo=e.total*parseFloat(ing.costo_unit||0);
     costoTotal+=costo;
     return`<div class="calc-result-row"><span class="calc-result-name">${ing.nombre}</span><span class="calc-result-qty">${e.total.toLocaleString('es')} ${ing.unidad||''}</span><span class="calc-result-cost">$${Math.round(costo).toLocaleString('es')}</span></div>`;
   }).join('');
@@ -2438,7 +2454,7 @@ function showIngModal(id){
   document.getElementById('ing-modal-title').textContent=ing?'Editar ingrediente':'Nuevo ingrediente';
   document.getElementById('ing-nombre').value=ing?.nombre||'';
   document.getElementById('ing-unidad').value=ing?.unidad||'';
-  document.getElementById('ing-costo').value=ing?.costo_unitario||'';
+  document.getElementById('ing-costo').value=ing?.costo_unit||'';
   document.getElementById('ing-stock-actual').value=ing?.stock_actual??'';
   document.getElementById('ing-stock-min').value=ing?.stock_minimo??'';
   document.getElementById('ing-modal-bg').classList.add('open');
@@ -2450,12 +2466,12 @@ function closeIngModal(e){
 async function saveIngrediente(){
   const nombre=document.getElementById('ing-nombre').value.trim();
   const unidad=document.getElementById('ing-unidad').value.trim();
-  const costo_unitario=parseFloat(document.getElementById('ing-costo').value)||0;
+  const costo_unit=parseFloat(document.getElementById('ing-costo').value)||0;
   const stock_actual=parseFloat(document.getElementById('ing-stock-actual').value)||0;
   const stock_minimo=parseFloat(document.getElementById('ing-stock-min').value)||0;
   if(!nombre){showToast('Ingresá un nombre');return;}
   const btn=document.getElementById('ing-save-btn');btn.disabled=true;btn.textContent='Guardando...';
-  const payload={nombre,unidad,costo_unitario,stock_actual,stock_minimo};
+  const payload={nombre,unidad,costo_unit,stock_actual,stock_minimo};
   const{error}=ingEditingId
     ?await db.from('ingredientes').update(payload).eq('id',ingEditingId)
     :await db.from('ingredientes').insert(payload);
@@ -2504,17 +2520,21 @@ function closeRecModal(e){
 async function saveReceta(){
   if(recEditingProductId===null) return;
   const prodId=parseInt(recEditingProductId);
-  const {error:delErr}=await db.from('recetas').delete().eq('producto_id',prodId);
-  if(delErr){showToast('Error: '+delErr.message,true);console.error('saveReceta delete',delErr);return;}
   const items=recItemsTemp.filter(r=>r.ingrediente_id&&parseFloat(r.cantidad)>0);
+  // Remove rows for ingredients no longer in the recipe
+  const keepIds=items.map(r=>parseInt(r.ingrediente_id));
+  if(keepIds.length){
+    await db.from('recetas').delete().eq('producto_id',prodId).not('ingrediente_id','in','('+keepIds.join(',')+')');
+  } else {
+    await db.from('recetas').delete().eq('producto_id',prodId);
+  }
   if(items.length){
     const rows=items.map(r=>({producto_id:prodId,ingrediente_id:parseInt(r.ingrediente_id),cantidad:parseFloat(r.cantidad)}));
-    const{error}=await db.from('recetas').insert(rows);
-    if(error){showToast('Error: '+error.message,true);console.error('saveReceta insert',error);return;}
+    const{error}=await db.from('recetas').upsert(rows,{onConflict:'producto_id,ingrediente_id'});
+    if(error){showToast('Error: '+error.message,true);console.error('saveReceta upsert',error);return;}
   }
   showToast('Receta guardada ✓');
   closeRecModal();
-  await loadRecetas();
   await renderIngRecetas();
 }
 
